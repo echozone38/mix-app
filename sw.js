@@ -1,27 +1,91 @@
-const CACHE_NAME = 'mix-app-v2';
+// Verzi měň při každé úpravě, aby se vynutila aktualizace cache
+const CACHE_NAME = 'mix-app-v3';
+
 const ASSETS = [
-  './',
-  './index.html',
-  './manifest.json',
-  // Ikony (pokud je přidáte do projektu)
-  './icon-192.png',
-  './icon-512.png'
+  '/',               // root
+  '/index.html',
+  '/manifest.json',
+  '/icon-192.png',
+  '/icon-512.png'
 ];
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
+// Instalace: přednačtení základních souborů
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(async (cache) => {
+      try {
+        await cache.addAll(ASSETS.map(
+          (url) => new Request(url, { cache: 'reload' })
+        ));
+      } catch (err) {
+        // Nepovinné: zalogovat chybu
+        console.error('Cache addAll failed:', err);
+      }
+    })
+  );
+  self.skipWaiting();
 });
 
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
-    caches.keys().then(keys => Promise.all(
-      keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))
-    ))
+// Aktivace: smazat staré cache a převzít kontrolu
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    (async () => {
+      const keys = await caches.keys();
+      await Promise.all(
+        keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
+      );
+      await self.clients.claim();
+    })()
   );
 });
 
-self.addEventListener('fetch', (e) => {
-  e.respondWith(
-    caches.match(e.request).then(res => res || fetch(e.request))
+// Fetch: cache-first pro statická aktiva; navigace -> offline fallback na index.html
+self.addEventListener('fetch', (event) => {
+  const { request } = event;
+
+  // Navigace (HTML stránky)
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      (async () => {
+        try {
+          const preload = await event.preloadResponse;
+          if (preload) return preload;
+
+          // Síť, pokud dostupná
+          const networkResp = await fetch(request);
+          return networkResp;
+        } catch {
+          // Offline fallback
+          const cache = await caches.open(CACHE_NAME);
+          const cachedIndex = await cache.match('/index.html');
+          return cachedIndex || Response.error();
+        }
+      })()
+    );
+    return;
+  }
+
+  // Ostatní požadavky – cache-first
+  event.respondWith(
+    caches.match(request).then((cached) => {
+      return (
+        cached ||
+        fetch(request).then((networkResp) => {
+          // Volitelné: uložit nové odpovědi do cache (runtime caching)
+          if (
+            networkResp &&
+            networkResp.status === 200 &&
+            request.method === 'GET' &&
+            request.url.startsWith(self.location.origin)
+          ) {
+            const respClone = networkResp.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(request, respClone);
+            });
+          }
+          return networkResp;
+        }).catch(() => cached) // pokud síť selže, vrať cache (pokud existuje)
+      );
+    })
   );
 });
